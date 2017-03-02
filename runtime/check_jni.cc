@@ -824,7 +824,8 @@ class ScopedCheck {
     }
 
     const char* errorKind = nullptr;
-    uint8_t utf8 = CheckUtfBytes(bytes, &errorKind);
+    //uint8_t utf8 = CheckUtfBytes(bytes, &errorKind);
+    uint8_t utf8 = *(bytes++);
     if (errorKind != nullptr) {
       JniAbortF(function_name_,
                 "input is not valid Modified UTF-8: illegal %s byte %#x\n"
