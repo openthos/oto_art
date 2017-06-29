@@ -237,9 +237,6 @@ static size_t FixStackSize(size_t stack_size) {
   return stack_size;
 }
 
-// Global variable to prevent the compiler optimizing away the page reads for the stack.
-byte dont_optimize_this;
-
 // Install a protected region in the stack.  This is used to trigger a SIGSEGV if a stack
 // overflow is detected.  It is located right below the stack_begin_.
 //
@@ -260,6 +257,18 @@ void Thread::InstallImplicitProtection() {
   // First remove the protection on the protected region as will want to read and
   // write it.  This may fail (on the first attempt when the stack is not mapped)
   // but we ignore that.
+  //
+  // We map in the stack by reading every page from the stack bottom (highest address)
+  // to the stack top. (We then madvise this away.) This must be done by reading from the
+  // current stack pointer downwards.
+  //
+  // Accesses too far below the current machine register corresponding to the stack pointer (e.g.,
+  // ESP on x86[-32], SP on ARM) might cause a SIGSEGV (at least on x86 with newer kernels). We
+  // thus have to move the stack pointer. We do this portably by using a recursive function with a
+  // large stack frame size.
+
+  // (Defensively) first remove the protection on the protected region as we'll want to read
+  // and write it. Ignore errors.
   UnprotectStack();
 
   // Map in the stack.  This must be done by reading from the
@@ -267,10 +276,26 @@ void Thread::InstallImplicitProtection() {
   // in the kernel.  Any access more than a page below the current SP might cause
   // a segv.
 
-  // Read every page from the high address to the low.
-  for (byte* p = stack_top; p >= pregion; p -= kPageSize) {
-    dont_optimize_this = *p;
-  }
+  struct RecurseDownStack {
+    // This function has an intentionally large stack size.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wframe-larger-than="
+    __attribute__ ((noinline))
+    static void Touch(uintptr_t target) {
+      volatile size_t zero = 0;
+      // Use a large local volatile array to ensure a large frame size. Do not use anything close
+      // to a full page for ASAN. It would be nice to ensure the frame size is at most a page, but
+      // there is no pragma support for this.
+      volatile char space[kPageSize - 256];
+      char sink __attribute__((__unused__)) = space[zero];
+      if (reinterpret_cast<uintptr_t>(space) >= target + kPageSize) {
+        Touch(target);
+      }
+      zero *= 2;  // Try to avoid tail recursion.
+    }
+#pragma GCC diagnostic pop
+  };
+  RecurseDownStack::Touch(reinterpret_cast<uintptr_t>(pregion));
 
   VLOG(threads) << "installing stack protected region at " << std::hex <<
       static_cast<void*>(pregion) << " to " <<
